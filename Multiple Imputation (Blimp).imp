@@ -1,0 +1,63 @@
+# points to data file, can be comma or space delimited, no alphanumerics, no column headers;
+# keep data in same folder as script, or add filepath ~/desktop...;
+DATA: baselineDataBlimp_0907.csv;
+
+# variables in order they appear in data set
+VARIABLES: depression_raw age audit_c count_lf ptsd anxietyr sadr intfsocr energr
+	anxiety_raw srMentH srPhysH srLivSit srDrugFree srSocNet srSexRx ssHelp ssEmoHelp ssNewFri
+	smAppFreq datingAppFreq losAng RaceEthnicity female cis heterosexual employed poverty
+	insured healthProvider medicalUtil_re erCare_re sapro_lf hivpp_lf homeless_lf
+	incarceration_lf ipv_lf sexex_lf suicide_lf hospitalmh_lf sexab_lf tmx5old_lf tmrob_lf 
+	tmotinj_lf tmotmdr_lf xdrug_r smoke_lf;
+
+# missing data code, must be numeric;
+MISSING: 999;
+
+# anything that's missing has to have a distribution;
+# by default software will assign a distribution to predictor variables;
+# Fixed is used when there is no missing data in a variable;
+# mean and variance not estimated;
+FIXED: age losAng RaceEthnicity female cis heterosexual sapro_lf homeless_lf hospitalmh_lf;
+
+# Use NOMINAL statement for categorical variables with more than 2 categories;
+NOMINAL: RaceEthnicity;
+
+# To maximize computational speed, Blimp recommends specifying binary variables on the ORDINAL line; 
+# although underlying statistical model invoked by the NOMINAL command is equivalent in this case;
+ORDINAL: losAng female cis heterosexual employed poverty insured healthProvider medicalUtil_re
+	erCare_re sapro_lf hivpp_lf homeless_lf incarceration_lf ipv_lf sexex_lf suicide_lf 
+	hospitalmh_lf sexab_lf tmx5old_lf tmrob_lf tmotinj_lf tmotmdr_lf xdrug_r smoke_lf;
+
+# fully conditional specification, specifies variables to be used by imputation algorithm;
+FCS: depression_raw age audit_c count_lf ptsd anxietyr sadr intfsocr energr
+	anxiety_raw srMentH srPhysH srLivSit srDrugFree srSocNet srSexRx ssHelp ssEmoHelp ssNewFri
+	smAppFreq datingAppFreq losAng RaceEthnicity female cis heterosexual employed poverty
+	insured healthProvider medicalUtil_re erCare_re sapro_lf hivpp_lf homeless_lf
+	incarceration_lf ipv_lf sexex_lf suicide_lf hospitalmh_lf sexab_lf tmx5old_lf tmrob_lf 
+	tmotinj_lf tmotmdr_lf xdrug_r smoke_lf;
+
+# set seed to replicate results;
+SEED: 90291;
+
+# number of imputed data sets;
+NIMPS: 50;
+
+# we can set this to a longer period to estimate convergence (like 5000);
+BURN: 1000;
+
+# number of iterations between imputations;
+THIN: 1000;
+
+# need multiple chains to assess convergence;
+CHAINS: 4 processors 4;
+
+# potential scale reduction factor; 
+# run chain multiple times, look at mean differences and convergence;
+# looking for identical means (avg. coefficients across burn-ins);
+# ideally want these values to be 1.05-1.10, for thresholds below 1.10-1.15 is acceptable;
+OPTIONS: psr;
+
+# save original data as well (so technically 51 data sets);
+# save the psrf values;
+# save parameter number labels to identify that with highest PSR;
+SAVE: stacked0 = imps_stacked.dat, psr = psr.dat, labels = parLabels.dat;

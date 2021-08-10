@@ -3,9 +3,7 @@ Code and data used for "How to Apply Variable Selection Machine Learning Algorit
 
 # Description of project
 
-Use an applied example to illustrate how to fit a LASSO when using listwise deletion
-or multiple imputation to handle the missing data. We evaluated a separate approach, stacked
-approach, and MI-LASSO (Chen & Wang, 2013).
+This tutorial walks through how to fit a LASSO when using listwise deletion or multiple imputation to handle the missing data. We used an applied example from the ATN CARES to illustrate the separate approach, stacked approach, MI-LASSO (Chen & Wang, 2013), and listwise deletion.
 
 # Files
 

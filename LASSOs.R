@@ -16,18 +16,16 @@ start.time.total <- Sys.time()
 #install.packages('splitstackshape')
 #install.packages('psych')
 #install.packages('mice')
-#install.packages('mitml')
 
 # call up libraries
 library(glmnet) # used for LASSOs
 library(splitstackshape) # used for getanID
-library(psych)
-library(mice)
-library(mitml)
+library(psych) # used for describe function
+library(mice) # use when analyzing FMI data
 
 ############################################################################
 ############################################################################
-# Prepare data for all 3 methods
+# Prepare data for all 3 imputation LASSO methods and listwise deletion
 ############################################################################
 ############################################################################
 
@@ -57,7 +55,7 @@ colnames(fullData)<-c(".imp","depression_raw","age","audit_c","count_lf","ptsd",
 fullData[fullData==999] <- NA
 
 ################################################################
-# Create dummy codes for categorical variables
+# Create dummy codes for categorical variables with more than 2 categories
 ################################################################
 
 # Designate race/ethnicity variable as categorical
@@ -104,56 +102,171 @@ names(Table1) <- c("Variable", "M (SD)", "Number Missing (%)")
 fullData <- fullData[,c(1,3:51,2)]
 
 # Create original data set with an id var
-id <- getanID(fullData, id.vars = ".imp")
-id <- id[which(id$.imp==0),]
+originalID <- getanID(fullData, id.vars = ".imp")
+originalID <- originalID[which(originalID$.imp==0),]
+
+# Select id variable for participants in complete case analysis and not
+idNoMiss <- originalID[complete.cases(originalID),52]
+idMiss <- originalID[rowSums(is.na(originalID)) > 0,52]
 
 # Shuffle rows to create random sample for training and test data sets
-set.seed(1333)
-id<-id[sample(nrow(id)),52]
+#set.seed(73346)
+set.seed(69437)
+idNoMiss<-idNoMiss[sample(nrow(idNoMiss)),]
+set.seed(90259)
+idMiss<-idMiss[sample(nrow(idMiss)),]
 
-# Create 75/25 split for training/test data sets
-cutoff <- .75*nrow(id)
-id_Train <- id[1:cutoff,1]
-id_Test <- id[(cutoff+1):(nrow(id)+1),1]
+# Create 75/25 split for training/test data sets separately for participants in complete case analysis
+# and for participants not in that analysis
+cutoff <- .75*nrow(idNoMiss)
+idNoMiss_Train <- idNoMiss[1:cutoff,1]
+idNoMiss_Test <- idNoMiss[(cutoff+1):(nrow(idNoMiss)+1),1]
+
+cutoff <- .75*nrow(idMiss)
+idMiss_Train <- idMiss[1:cutoff,1]
+idMiss_Test <- idMiss[(cutoff+1):(nrow(idMiss)+1),1]
+
+# Combine the IDs for participants with complete data and with missing data
+id_Train <- rbind(idNoMiss_Train,idMiss_Train)
+id_Test <- rbind(idNoMiss_Test,idMiss_Test)
 
 # Recreate data set (original and imputed data sets) with id var
-id <- getanID(fullData, id.vars = ".imp")
+fullDataID <- getanID(fullData, id.vars = ".imp")
 
 # Create training data set, selecting participants from randomized id variable
-TrainData <- id[id$.id %in% id_Train$.id,-52]
+TrainData <- fullDataID[fullDataID$.id %in% id_Train$.id,-52]
 
 # Create test data set
-TestData <- id[id$.id %in% id_Test$.id,-52]
+TestData <- fullDataID[fullDataID$.id %in% id_Test$.id,-52]
 
 # Optional: Remove unnecessary data sets and values to clean up RStudio workspace (these data sets are not used in future code)
-rm(id,id_Train,id_Test,cutoff)
+rm(fullData,originalID,idNoMiss,idNoMiss_Test,idNoMiss_Train,idMiss,idMiss_Test,idMiss_Train,id_Test,id_Train,cutoff)
 rm(datmeansd,datpercmiss,datmeans,datmiss,datsd,percmiss,original)
 
 ###############################################################
-# Create empty matrices to save output for the three approaches
+# Create empty matrices to save output for the 4 approaches
 ###############################################################
 
-# Define parameters (number of imputations, number of predictors, number of folds)
+# 4 approaches = Listwise, Separate, Stacked, MI-LASSO
+
+# Define parameters (number of imputations, number of predictors, number of folds, sample size)
 m = 50
 P = ncol(TrainData) - 2 # subtract outcome and imputation columns
 k = 10
-N = nrow(fullData[fullData$.imp==0,-1])
+N = nrow(fullDataID[fullDataID$.imp==0,-1])
 Ntrain = nrow(TrainData[TrainData$.imp==0,-1])
 Ntest = nrow(TestData[TestData$.imp==0,-1])
 
-# Save regression coefficients (including intercept) in final model for all 3 approaches
-# Separate approach has 5 different options + post-LASSO
-# Stacked approach has 3 different options + post-LASSO
-# MI-LASSO has 1 option + post-LASSO
-# OLS regression as sensitivity analysis
-# 6+4+2+1 = 13 columns
-Coefficients = matrix(NA,P+1,13)
+# Save regression coefficients (including intercept) in final model for all approaches
+# Listwise deletion has 1 option
+# Separate approach has 5 different options
+# Stacked approach has 3 different options
+# MI-LASSO has 1 option
+# 1+5+3+1 = 10 columns
+Coefficients = matrix(NA,P+1,10)
 
-# Save fit measures (MSE and R-squared) and optimal lambda
-Fit = matrix(NA,5,13)
-#colnames(Fit)<-c("SepAvg","SepMed","SepMin","SepMax","SepInd","SepPost","StackedW","StackedW2","StackedNW",
-#                 "StackedPost","MI-LASSO","MI-LASSOpost","OLS")
+# Save fit measures (MSE and R-squared) and optimal lambda for all approaches
+Fit = matrix(NA,5,10)
+#colnames(Fit)<-c("Listwise","SepAvg","SepMed","SepMin","SepMax","SepInd","StackedW","StackedW2",
+#                 "StackedNW","MI-LASSO")
 #rownames(Fit)<-c("R2 training","MSE training","R2 test","MSE test","lambda")
+
+
+############################################################################
+############################################################################
+# Listwise Deletion
+############################################################################
+############################################################################
+
+##############################################
+# Prepare data
+##############################################
+
+# Select original data set (contains missing values) and remove "imp" column
+originalTrain <- TrainData[TrainData$.imp==0,-1]
+originalTest <- TestData[TestData$.imp==0,-1]
+
+# Create data set with only participants who have no missing data on any variables
+listwiseTrain <- originalTrain[complete.cases(originalTrain),]
+listwiseTest <- originalTest[complete.cases(originalTest),]
+
+# Calculating sample sizes
+Nlist <- nrow(listwiseTrain)+nrow(listwiseTest)
+nrow(listwiseTrain)
+nrow(listwiseTest)
+
+##############################################
+# Cross-validation
+##############################################
+
+# 10-fold cross-validation to determine optimal lambda via MSE
+# x = matrix of predictors
+# y = vector of outcome scores
+# alpha = 1: specifies the LASSO, 0: specifies ridge regression, any # in between: specifies elastic net
+# standardize: standardizes the predictors, but returned coefficients are on original scale
+# intercept: estimate the intercept (don't constrain it to be 0)
+# type.measure: measure of fit/error to determine optimal lambda
+# nfolds: specify number of folds (k=10 for this example)
+set.seed(1989)
+cv.listwise <- cv.glmnet(x=data.matrix(listwiseTrain[,1:P]),y=listwiseTrain$depression_raw, 
+                         alpha=1,standardize=TRUE,intercept=TRUE,type.measure="mse",nfolds=k)
+
+# Save value of lambda that gives minimum cvm (mean cross-validated error)
+lambdaListwise <- cv.listwise$lambda.min
+Fit[5,1] <- lambdaListwise
+
+# Checking what cv.glmnet is doing
+cv.listwise$lambda
+cv.listwise$cvm
+check = glmnet(x=data.matrix(listwiseTrain[,1:P]),y=listwiseTrain$depression_raw,
+                        alpha=1,standardize=TRUE,intercept=TRUE,lambda=4.464565169)
+as.array(check$beta)
+check = glmnet(x=data.matrix(listwiseTrain[,1:P]),y=listwiseTrain$depression_raw,
+               alpha=1,standardize=TRUE,intercept=TRUE,lambda=4.067945504)
+as.array(check$beta)
+check = glmnet(x=data.matrix(listwiseTrain[,1:P]),y=listwiseTrain$depression_raw,
+               alpha=1,standardize=TRUE,intercept=TRUE,lambda=0.003793780)
+as.array(check$beta)
+
+##############################################
+# Training Model
+##############################################
+
+# LASSO on full training data using cross-validated lambda
+train.listwise = glmnet(x=data.matrix(listwiseTrain[,1:P]),y=listwiseTrain$depression_raw,
+                        alpha=1,standardize=TRUE,intercept=TRUE,lambda=lambdaListwise)
+
+# Save regression coefficients (beta) including intercept (a0)
+Coefficients[2:nrow(Coefficients),1] <- as.array(train.listwise$beta)
+Coefficients[1,1] <- unname(train.listwise$a0)
+
+# Calculate predicted scores for each participant based on the model (link gives linear predictors, default)
+predict_listwise_train <- predict(train.listwise,newx=data.matrix(listwiseTrain[,1:P]),type="link")
+
+# Calculate MSE, mean of Equation 1 in paper
+Fit[2,1] <- mean((listwiseTrain$depression_raw - predict_listwise_train)^2)
+
+# Calculate R-squared in training set
+Fit[1,1] <- train.listwise$dev.ratio
+
+##############################################
+# Test Model
+##############################################
+
+# Calculate predicted scores for each participant in test set based on the training model
+predict_listwise_test <- predict(train.listwise,newx=data.matrix(listwiseTest[,1:P]),type="link")
+# Calculate MSE, mean of Equation 1 in paper
+Fit[4,1] <- mean((listwiseTest$depression_raw - predict_listwise_test)^2)
+# Notice that mean of residuals is not 0 in test set, thus r^2 must be calculated with RSS, not predicted sum of squares
+mean(listwiseTest$depression_raw - predict_listwise_test)
+
+# Calculate residual sum of squares in test set
+rss_listwise_test <- sum((listwiseTest$depression_raw - predict_listwise_test)^2)
+# Calculate total sum of squares in test set
+tss_listwise_test <- sum((listwiseTest$depression_raw - mean(listwiseTest$depression_raw))^2)
+# Calculate R-squared in test set
+Fit[3,1] <- 1 - rss_listwise_test/tss_listwise_test
+
 
 ############################################################################
 ############################################################################
@@ -201,13 +314,40 @@ lambdaSepAvg = mean(lambdaSeparate)
 lambdaSepMed = median(lambdaSeparate)
 lambdaSepMin = min(lambdaSeparate)
 lambdaSepMax = max(lambdaSeparate)
-Fit[5,1] <- lambdaSepAvg
-Fit[5,2] <- lambdaSepMed
-Fit[5,3] <- lambdaSepMin
-Fit[5,4] <- lambdaSepMax
+Fit[5,2] <- lambdaSepAvg
+Fit[5,3] <- lambdaSepMed
+Fit[5,4] <- lambdaSepMin
+Fit[5,5] <- lambdaSepMax
 
 # Distribution of lambda values
-hist(lambdaSeparate, xlab="Lamba")
+#hist(lambdaSeparate, xlab="Lamba")
+
+# Checking within-imputation lambda value
+oneImputed <- imputedTrain[which(imputedTrain$.imp==1),-1]
+set.seed(74592)
+cv.separate <- cv.glmnet(x=data.matrix(oneImputed[,1:P]), y=oneImputed$depression_raw,
+                         alpha=1,standardize=TRUE,intercept=TRUE,type.measure="mse",nfolds=k)
+cv.separate$lambda.min
+
+# Allowing lambda values to have within- and between-imputation variance
+lambdaSeparateWB = matrix(NA,m)
+set.seed(17463)
+for(d in 1:m){
+  # Create one imputed data set
+  oneImputed <- imputedTrain[which(imputedTrain$.imp==d),-1]
+  
+  # 10-fold Cross-validation to find lambda (for that imputed data set)
+  cv.separate <- cv.glmnet(x=data.matrix(oneImputed[,1:P]), y=oneImputed$depression_raw,
+                           alpha=1,standardize=TRUE,intercept=TRUE,type.measure="mse",nfolds=k)
+  
+  # save value of lambda that gives minimum cvm (mean cross-validated error) for that imputed data set
+  lambdaSeparateWB[d] <- cv.separate$lambda.min
+}
+mean(lambdaSeparateWB)
+median(lambdaSeparateWB)
+min(lambdaSeparateWB)
+max(lambdaSeparateWB)
+Fit[5,2:5]
 
 ##############################################
 # Training Data
@@ -280,29 +420,29 @@ for(i in 1:nrow(coefSeparAvg)){
   InclFreq[i,5] <- (m - sum(coefSeparInd[i,1:m] == 0))/m*100
   
   if(InclFreq[i,1] < threshold){
-    Coefficients[i,1] = 0
-  } else {
-    Coefficients[i,1] = mean(coefSeparAvg[i,1:m])
-  }
-  if(InclFreq[i,2] < threshold){
     Coefficients[i,2] = 0
   } else {
-    Coefficients[i,2] = mean(coefSeparMed[i,1:m])
+    Coefficients[i,2] = mean(coefSeparAvg[i,1:m])
   }
-  if(InclFreq[i,3] < threshold){
+  if(InclFreq[i,2] < threshold){
     Coefficients[i,3] = 0
   } else {
-    Coefficients[i,3] = mean(coefSeparMin[i,1:m])
+    Coefficients[i,3] = mean(coefSeparMed[i,1:m])
   }
-  if(InclFreq[i,4] < threshold){
+  if(InclFreq[i,3] < threshold){
     Coefficients[i,4] = 0
   } else {
-    Coefficients[i,4] = mean(coefSeparMax[i,1:m])
+    Coefficients[i,4] = mean(coefSeparMin[i,1:m])
   }
-  if(InclFreq[i,5] < threshold){
+  if(InclFreq[i,4] < threshold){
     Coefficients[i,5] = 0
   } else {
-    Coefficients[i,5] = mean(coefSeparInd[i,1:m])
+    Coefficients[i,5] = mean(coefSeparMax[i,1:m])
+  }
+  if(InclFreq[i,5] < threshold){
+    Coefficients[i,6] = 0
+  } else {
+    Coefficients[i,6] = mean(coefSeparInd[i,1:m])
   }
 }
 
@@ -311,10 +451,11 @@ VarNames <- rownames(coef(train.separate.avg))
 VarNames[1] <- "Intercept"
 
 # Apply variable names to rows of Inclusion Frequency matrix
-colnames(InclFreq)<-c("Avg","Median","Min","Max","Ind")
+colnames(InclFreq)<-c("Mean","Median","Min","Max","Ind")
 rownames(InclFreq) <- VarNames
 InclFreq <- as.data.frame(InclFreq)
 
+###### Comparing the 5 separate approaches 
 # Order in ascending order
 #InclFreq <- InclFreq[order(InclFreq[,4], InclFreq[,3]),]
 
@@ -323,20 +464,17 @@ Keep <- ifelse(InclFreq >= 50,1,0)
 # Order in ascending order
 Keep <- Keep[order(Keep[,4], Keep[,1], Keep[,3]),]
 
-# Number of variables selected by each lambda option (not including intercept)
+# Number of variables selected by each lambda option (subtract intercept)
 sum(Keep[2:49,1])
 sum(Keep[2:49,2])
 sum(Keep[2:49,3])
 sum(Keep[2:49,4])
 sum(Keep[2:49,5])
 
-# Number of variables selected for max value (not including intercept)
-KeepMax.1 <- ifelse(InclFreq[2:50,4] >= 1,1,0)
-KeepMax.50 <- ifelse(InclFreq[2:50,4] >= 50,1,0)
-KeepMax.100 <- ifelse(InclFreq[2:50,4] >= 100,1,0)
-sum(KeepMax.1)
-sum(KeepMax.50)
-sum(KeepMax.100)
+# For mean lambda, how many variables selected in 1, half, all imputed data sets? (subtract intercept)
+sum(InclFreq$Mean > 0) - 1
+sum(InclFreq$Mean >= 50) - 1
+sum(InclFreq$Mean == 100) - 1
 
 ####### Calculate Fit Statistics ########
 
@@ -344,107 +482,43 @@ sum(KeepMax.100)
 x = data.matrix(imputedTrain[,2:50]) # select all columns of predictors
 y = as.numeric(imputedTrain$depression_raw) # select outcome
 predTrainSep = matrix(NA,nrow(imputedTrain),6) # create empty matrix to store predicted values
-for(j in 1:5){
+for(j in 2:6){
   b0 = Coefficients[1,j]
   b = Coefficients[2:50,j]
   predTrainSep[1:nrow(imputedTrain),j] = x%*%b+b0 # calculate predicted y scores based on model
 }
 
 # Adding column to designate imputed data set
-predTrainSep[,6] <- imputedTrain$.imp
+predTrainSep[,1] <- imputedTrain$.imp
 
 # Calculate fit statistics within each imputed data set using the final model
-rsquared = matrix(NA,m,5)
-mse = matrix(NA,m,5)
+rsqSepTrain = matrix(NA,m,5)
+mseSepTrain = matrix(NA,m,5)
 for(d in 1:m){
   # Create observed variable for one imputed data set
   oneImputed <- imputedTrain[which(imputedTrain$.imp==d),-1]
   y <- as.numeric(oneImputed$depression_raw)
   
   # Create predicted scores for one imputed data set
-  onePredict <- predTrainSep[which(predTrainSep[,6]==d),]
+  onePredict <- predTrainSep[which(predTrainSep[,1]==d),-1]
   
   # Calculate R-squared in training set for all 5 lambda values
   # Calculate MSE, mean of Equation 1 in paper
   for(l in 1:5){
-    rsquared[d,l] = 1 - sum((y - onePredict[,l])^2)/sum((y - mean(y))^2)
-    mse[d,l] = mean((y - onePredict[,l])^2)
+    rsqSepTrain[d,l] = 1 - sum((y - onePredict[,l])^2)/sum((y - mean(y))^2)
+    mseSepTrain[d,l] = mean((y - onePredict[,l])^2)
   }
 }
 
 # Calculate the inverse hyperbolic tangent of r
-zScores = atanh(sqrt(rsquared))
+zScores = atanh(sqrt(rsqSepTrain))
 
 # Calculate averaged z value and convert back to r-squared
 # Calculate averaged mse
 for(r in 1:5){
-  Fit[1,r] = tanh(mean(zScores[,r]))^2
-  Fit[2,r] = mean(mse[,r])
+  Fit[1,r+1] = tanh(mean(zScores[,r]))^2
+  Fit[2,r+1] = mean(mseSepTrain[,r])
 }
-
-
-####### Post-Lasso Model using maximum lambda value ########
-
-# Convert imputed data set to mids type
-TrainData_mids<-as.mids(TrainData)
-
-# Analyze an OLS Regression within each imputed data set based on LASSO selection
-Keep2 <- Keep[Keep[,4]==1,]
-rownames(Keep2)
-PostLassoSep <- with(TrainData_mids,
-                     lm(depression_raw ~ ptsd+anxietyr+sadr+intfsocr+energr+anxiety_raw+
-                          srMentH+srPhysH+ssNewFri+losAng+cis+medicalUtil_re+hivpp_lf+
-                          suicide_lf+sexab_lf+tmrob_lf+tmotmdr_lf))
-
-# Pool the estimates and standard errors via Rubin's Rules
-PostLassoSepResults <- summary(pool(PostLassoSep))
-
-# Flag significant predictors
-PostLassoSepResults$sig <- ifelse(PostLassoSepResults$p.value > .05, 0, 1)
-
-# Save pooled coefficient estimates (include non-selected variables)
-PLCoef <- PostLassoSepResults$estimate
-PostLassoSepResults
-rownames(InclFreq)
-CoefSepPL <- c(PLCoef[1],0,0,0,PLCoef[2:9],0,0,0,0,0,0,PLCoef[10],0,0,PLCoef[11],0,
-             PLCoef[12],0,0,0,0,0,PLCoef[13],0,0,PLCoef[14],0,0,0,0,PLCoef[15],0,
-             PLCoef[16],0,PLCoef[17],0,PLCoef[18],0,0,0,0,0,0)
-Coefficients[1:50,6] <- CoefSepPL
-
-# Calculate predicted scores for each participant in training set based on the averaged coefficients
-x = data.matrix(imputedTrain[,2:50]) # select columns of selected predictors
-y = as.numeric(imputedTrain$depression_raw) # select outcome
-predTrainSepPL = matrix(NA,nrow(imputedTrain),2) # create empty matrix to store predicted values
-b0 = Coefficients[1,6]
-b = Coefficients[2:50,6]
-predTrainSepPL[1:nrow(imputedTrain),] = x%*%b+b0 # calculate predicted y scores based on model
-predTrainSepPL[,2] <- imputedTrain$.imp
-
-# Calculate fit statistics within each imputed data set using the final model
-rsquaredPL = matrix(NA,m,1)
-msePL = matrix(NA,m,1)
-for(d in 1:m){
-  # Create observed variable for one imputed data set
-  oneImputed <- imputedTrain[which(imputedTrain$.imp==d),-1]
-  y <- as.numeric(oneImputed$depression_raw)
-  
-  # Create predicted scores for one imputed data set
-  onePredict <- predTrainSepPL[which(predTrainSepPL[,2]==d),]
-  
-  # Calculate R-squared in training set for all 5 lambda values
-  # Calculate MSE, mean of Equation 1 in paper
-  rsquaredPL[d,1] = 1 - sum((y - onePredict[,1])^2)/sum((y - mean(y))^2)
-  msePL[d,1] = mean((y - onePredict[,1])^2)
-}
-
-# Calculate the inverse hyperbolic tangent of r
-zScoresPL = atanh(sqrt(rsquaredPL))
-
-# Calculate averaged z value and convert back to r-squared
-# Calculate averaged mse
-Fit[1,6] = tanh(mean(zScoresPL[,1]))^2
-Fit[2,6] = mean(msePL[,1])
-
 
 ##############################################
 # Test Data
@@ -456,13 +530,13 @@ Fit[2,6] = mean(msePL[,1])
 x = data.matrix(imputedTest[,2:50]) # select all columns of predictors
 y = as.numeric(imputedTest$depression_raw) # select outcome
 predTestSep = matrix(NA,nrow(imputedTest),6) # create empty matrix to store predicted values
-for(j in 1:5){
+for(j in 2:6){
   b0 = Coefficients[1,j]
   b = Coefficients[2:50,j]
   predTestSep[1:nrow(imputedTest),j] = x%*%b+b0 # calculate predicted y scores based on model
 }
 
-predTestSep[,6] <- imputedTest$.imp
+predTestSep[,1] <- imputedTest$.imp
 
 # Calculate fit statistics within each imputed data set using the final model
 rsqSepTest = matrix(NA,m,5)
@@ -473,7 +547,7 @@ for(d in 1:m){
   y <- as.numeric(oneImputed$depression_raw)
   
   # Create predicted scores for one imputed data set
-  onePredict <- predTestSep[which(predTestSep[,6]==d),]
+  onePredict <- predTestSep[which(predTestSep[,1]==d),-1]
   
   # Calculate R-squared in training set for all 5 lambda values
   # Calculate MSE, mean of Equation 1 in paper
@@ -489,46 +563,9 @@ zScoresTest = atanh(sqrt(rsqSepTest))
 # Calculate averaged z value and convert back to r-squared
 # Calculate averaged mse
 for(r in 1:5){
-  Fit[3,r] = tanh(mean(zScoresTest[,r]))^2
-  Fit[4,r] = mean(mseSepTest[,r])
+  Fit[3,r+1] = tanh(mean(zScoresTest[,r]))^2
+  Fit[4,r+1] = mean(mseSepTest[,r])
 }
-
-####### Calculate Fit Statistics for Post-LASSO Estimation ########
-
-# Calculate predicted scores for each participant in training set based on the averaged coefficients
-x = data.matrix(imputedTest[,2:50]) # select columns of selected predictors
-y = as.numeric(imputedTest$depression_raw) # select outcome
-predTestSepPL = matrix(NA,nrow(imputedTest),2) # create empty matrix to store predicted values
-b0 = Coefficients[1,6]
-b = Coefficients[2:50,6]
-predTestSepPL[1:nrow(imputedTest),] = x%*%b+b0 # calculate predicted y scores based on model
-predTestSepPL[,2] <- imputedTest$.imp
-
-# Calculate fit statistics within each imputed data set using the final model
-rsquaredPLTest = matrix(NA,m,1)
-msePLTest = matrix(NA,m,1)
-for(d in 1:m){
-  # Create observed variable for one imputed data set
-  oneImputed <- imputedTest[which(imputedTest$.imp==d),-1]
-  y <- as.numeric(oneImputed$depression_raw)
-  
-  # Create predicted scores for one imputed data set
-  onePredict <- predTestSepPL[which(predTestSepPL[,2]==d),]
-  
-  # Calculate R-squared in training set for all 5 lambda values
-  # Calculate MSE, mean of Equation 1 in paper
-  rsquaredPLTest[d,1] = 1 - sum((y - onePredict[,1])^2)/sum((y - mean(y))^2)
-  msePLTest[d,1] = mean((y - onePredict[,1])^2)
-}
-
-# Calculate the inverse hyperbolic tangent of r
-zScoresPLtest = atanh(sqrt(rsquaredPLTest))
-
-# Calculate averaged z value and convert back to r-squared
-# Calculate averaged mse
-Fit[3,6] = tanh(mean(zScoresPLtest[,1]))^2
-Fit[4,6] = mean(msePLTest[,1])
-
 
 
 ############################################################################
@@ -712,91 +749,18 @@ Fit[3,9] <- 1 - rss_stackedNW_test/tss_stackedNW_test
 Fit[4,9] <- mean((stackedTest$depression_raw - predict_stackedNW_test)^2)
 
 
-##############################################
-# Post-Lasso Model
-##############################################
-
-####### Estimating OLS model ########
-
-# Was variable selected by LASSO
-train.stacked$beta # all variables except White selected
-
-# OLS regression on stacked data set for just the selected variables
-PLstackedW <- lm(depression_raw ~ age+audit_c+count_lf+ptsd+anxietyr+sadr+intfsocr+energr+
-                   anxiety_raw+srMentH+srPhysH+srLivSit+srDrugFree+srSocNet+srSexRx+ssHelp+
-                   ssEmoHelp+ssNewFri+smAppFreq+datingAppFreq+losAng+female+cis+heterosexual+
-                   employed+poverty+insured+healthProvider+medicalUtil_re+erCare_re+sapro_lf+
-                   hivpp_lf+homeless_lf+incarceration_lf+ipv_lf+sexex_lf+suicide_lf+hospitalmh_lf+
-                   sexab_lf+tmx5old_lf+tmrob_lf+tmotinj_lf+tmotmdr_lf+xdrug_r+smoke_lf+Black+Latinx+Other, 
-                 data=stackedTrain, weights = WeightsTrain)
-PLstackedW2 <- lm(depression_raw ~ age+audit_c+count_lf+ptsd+anxietyr+sadr+intfsocr+energr+
-                  anxiety_raw+srMentH+srPhysH+srLivSit+srDrugFree+srSocNet+srSexRx+ssHelp+
-                  ssEmoHelp+ssNewFri+smAppFreq+datingAppFreq+losAng+female+cis+heterosexual+
-                  employed+poverty+insured+healthProvider+medicalUtil_re+erCare_re+sapro_lf+
-                  hivpp_lf+homeless_lf+incarceration_lf+ipv_lf+sexex_lf+suicide_lf+hospitalmh_lf+
-                  sexab_lf+tmx5old_lf+tmrob_lf+tmotinj_lf+tmotmdr_lf+xdrug_r+smoke_lf+Black+Latinx+Other, 
-                data=stackedTrain, weights = WeightsTrain2)
-PLstackedNW <- lm(depression_raw ~ age+audit_c+count_lf+ptsd+anxietyr+sadr+intfsocr+energr+
-                  anxiety_raw+srMentH+srPhysH+srLivSit+srDrugFree+srSocNet+srSexRx+ssHelp+
-                  ssEmoHelp+ssNewFri+smAppFreq+datingAppFreq+losAng+female+cis+heterosexual+
-                  employed+poverty+insured+healthProvider+medicalUtil_re+erCare_re+sapro_lf+
-                  hivpp_lf+homeless_lf+incarceration_lf+ipv_lf+sexex_lf+suicide_lf+hospitalmh_lf+
-                  sexab_lf+tmx5old_lf+tmrob_lf+tmotinj_lf+tmotmdr_lf+xdrug_r+smoke_lf+Black+Latinx+Other, 
-                data=stackedTrain)
-
-# Save coefficient estimates (include non-selected variables as 0s)
-PLsCoef <- PLstackedW2$coefficients
-Coefficients[1:50,10] <- c(PLsCoef[1:48],0,PLsCoef[49])
-
-####### Training Data ########
-
-# Calculate predicted scores for each participant in training set based on the averaged coefficients
-x = data.matrix(stackedTrain[,1:49]) # select columns of selected predictors
-y = as.numeric(stackedTrain$depression_raw) # select outcome
-predTrainStaPL = matrix(NA,nrow(stackedTrain),1) # create empty matrix to store predicted values
-b0 = Coefficients[1,10]
-b = Coefficients[2:50,10]
-predTrainStaPL[1:nrow(stackedTrain),1] = x%*%b+b0 # calculate predicted y scores based on model
-
-# Calculate R-squared in training set
-rss_stackedPL_train <- sum((stackedTrain$depression_raw - predTrainStaPL)^2)
-tss_stackedPL_train <- sum((stackedTrain$depression_raw - mean(stackedTrain$depression_raw))^2)
-Fit[1,10] <- 1 - rss_stackedPL_train/tss_stackedPL_train
-
-# Calculate MSE, mean of Equation 1 in paper
-Fit[2,10] <- mean((stackedTrain$depression_raw - predTrainStaPL)^2)
-
-####### Test Data ########
-
-# Calculate predicted scores for each participant in training set based on the averaged coefficients
-x = data.matrix(stackedTest[,1:49]) # select columns of selected predictors
-y = as.numeric(stackedTest$depression_raw) # select outcome
-predTestStaPL = matrix(NA,nrow(stackedTest),1) # create empty matrix to store predicted values
-b0 = Coefficients[1,10]
-b = Coefficients[2:50,10]
-predTestStaPL[1:nrow(stackedTest),1] = x%*%b+b0 # calculate predicted y scores based on model
-
-# Calculate R-squared in training set
-rss_stackedPL_test <- sum((stackedTest$depression_raw - predTestStaPL)^2)
-tss_stackedPL_test <- sum((stackedTest$depression_raw - mean(stackedTest$depression_raw))^2)
-Fit[3,10] <- 1 - rss_stackedPL_test/tss_stackedPL_test
-
-# Calculate MSE, mean of Equation 1 in paper
-Fit[4,10] <- mean((stackedTest$depression_raw - predTestStaPL)^2)
-
-
-
 ############################################################################
 ############################################################################
 # MI-LASSO
 ############################################################################
 ############################################################################
 
-##############################################
-# modified MI.LASSO function, contact original authors Chen and Wang (2013) for original code
-##############################################
+############################################################################
+# modified MI.LASSO function
+# see Chen and Wang (2013) for original function: http://www.columbia.edu/~qc2138/
+############################################################################
 
-MI.LASSO.mod = function(mydata=mydata, D, lambda, maxiter=200, eps=1e-6) {
+MI.LASSO.mod = function(mydata, D, lambda, maxiter=200, eps=1e-6) {
   ## D is the number of imputations
   ## mydata is in the array format: mydata[[1]] is the first imputed dataset...
   ## for each mydata[[d]], the first p columns are covariates X, and the last one is the outcome Y
@@ -889,6 +853,8 @@ MI.LASSO.mod = function(mydata=mydata, D, lambda, maxiter=200, eps=1e-6) {
     
     # Create predicted scores for one imputed data set
     yhat[[d]] = x[[d]]%*%b_avg[,1]+b0_avg
+    #yhat[[d]] = x[[d]]%*%coefficients[2:(p+1),d]+coefficients[1,d]
+    # Use final model, not imputation-specific models
     
     # Calculate R-squared
     rsqMIL[d] = 1 - sum((y[[d]] - yhat[[d]])^2)/sum((y[[d]] - mean(y[[d]]))^2)
@@ -929,14 +895,14 @@ fold <- cut(seq(1,Ntrain),breaks=k,labels=FALSE)
 folds = rep(fold,times=m)
 
 # Create vector of lambdas to test
-# initially ran 
+# ran the following sequences to narrow down values (save time)
 # grid = 10^seq(-3,3,by=1)
-# grid = 10^seq(1,2,by=.1)
-# to narrow down values
-grid = 10^seq(1.3,1.5,by=.1)
+# grid = 10^seq(0,2,by=.25)
+# grid = 10^seq(1.05,1.5,by=.075)
+grid = 10^seq(1.35,1.425,by=.075)
 err = matrix(NA,k,length(grid)) # k by lambda
 
-# calculate start time to determine how long analyses take to run
+# calculate start time to determine how long analyses take to run, takes a little over 3 hours
 start.time.mil <- Sys.time()
 
 # Perform 10-fold cross validation
@@ -952,7 +918,6 @@ for(f in 1:k){
   validData <- miLASSOTrain[testIndexes,] # Create data set for f fold (validation set)
   # For 9 of the folds, train the model for a particular lambda value
   for (l in 1:length(grid)){
-    #klambda = grid[l]
     fit.train = MI.LASSO.mod(NineFoldData, D=m, lambda=grid[l])
     
     # average the coefficients
@@ -961,9 +926,10 @@ for(f in 1:k){
       AvgCoef[i] <- mean(fit.train$coefficients[i,1:m])
     }
     
+    # create empty matrix for MSE values for this fold and lambda value
     mseMIL = matrix(NA,m)
     
-    # Calculate predicted scores based on model in 10th fold, for each imputed data set 1-m
+    # Calculate predicted scores based on model in validation fold, for each imputed data set
     for (d in 1:m){
       x = as.matrix(validData[which(validData$.imp==d),2:50]) # select all p predictor columns
       y = as.matrix(validData[which(validData$.imp==d),51])
@@ -980,7 +946,7 @@ for(f in 1:k){
   }
 }
 
-# calculate end time to determine how long cross-validation taks sto run
+# calculate end time to determine how long cross-validation takes to run
 end.time.mil <- Sys.time()
 time.taken.mil <- end.time.mil - start.time.mil
 
@@ -991,7 +957,7 @@ mean_err = colMeans(err, na.rm=T)
 lambdaMiLASSO <- grid[which(colMeans(err, na.rm=T) == min(colMeans(err, na.rm=T)), arr.ind = TRUE)]
 
 # Save optimal lambda value
-Fit[5,11] <- lambdaMiLASSO
+Fit[5,10] <- lambdaMiLASSO
 
 ##############################################
 # Training Model
@@ -1006,29 +972,13 @@ for(d in 1:m){
 # LASSO on full training data using cross-validated lambda
 train.miLASSO = MI.LASSO.mod(miLASSOTrainList, D=m, lambda=lambdaMiLASSO)
 
-# Regression coefficients vary by data set so take average across imputed data sets
-#avgCoeff <- apply(train.miLASSO$coefficients,1,FUN=mean)
-
-# Save regression coefficients including intercept
-#Coefficients[1:nrow(Coefficients),10] <- as.array(avgCoeff)
-Coefficients[1,11] <- train.miLASSO$b0
-Coefficients[2:nrow(Coefficients),11] <- train.miLASSO$b
+# Save averaged regression coefficients including intercept
+Coefficients[1,10] <- train.miLASSO$b0
+Coefficients[2:nrow(Coefficients),10] <- train.miLASSO$b
 
 # Save MSE and R-squared for training model
-Fit[1,11] <- train.miLASSO$r2
-Fit[2,11] <- train.miLASSO$mse
-
-# Distribution of coefficients
-MILcoefficients <- train.miLASSO$coefficients
-# Remove variables that weren't selected
-MILcoefficients2 <- MILcoefficients[MILcoefficients[,1] != 0,]
-
-for(j in 1:nrow(MILcoefficients2)){
-  hist(MILcoefficients2[j,1:50], xlab="Coefficients")
-}
-
-hist(MILcoefficients[9,1:50], xlab="Coefficients")
-hist(MILcoefficients[20,1:50], xlab="Coefficients")
+Fit[1,10] <- train.miLASSO$r2
+Fit[2,10] <- train.miLASSO$mse
 
 ##############################################
 # Test Model
@@ -1055,219 +1005,9 @@ zScoresMILTest = atanh(sqrt(rsqMILTest))
 
 # Calculate averaged z value and convert back to r-squared
 # Calculate averaged mse
-Fit[3,11] = tanh(mean(zScoresMILTest))^2
-Fit[4,11] = mean(mseMILtest)
+Fit[3,10] = tanh(mean(zScoresMILTest))^2
+Fit[4,10] = mean(mseMILtest)
 
-##############################################
-# Post-LASSO estimation
-##############################################
-
-####### OLS Estimation ########
-
-# Selected variables
-milSelected <- cbind(VarNames[2:50],train.miLASSO$varsel)
-#View(milSelected)
-sum(train.miLASSO$varsel)
-
-# Analyze an OLS Regression within each imputed data set
-milPLestimates <- with(TrainData_mids,
-                     lm(depression_raw ~ ptsd+anxietyr+sadr+intfsocr+energr+
-                          anxiety_raw+srMentH+srPhysH+srLivSit+ssHelp+
-                          ssNewFri+losAng+cis+employed+medicalUtil_re+
-                          hivpp_lf+suicide_lf+sexab_lf+tmrob_lf+tmotmdr_lf+
-                          xdrug_r+smoke_lf))
-
-# Pool the estimates and standard errors via Rubin's Rules
-milPLresults <- summary(pool(milPLestimates))
-
-# Flag significant predictors
-milPLresults$sig <- ifelse(milPLresults$p.value > .05, 0, 1)
-#View(milPLresults)
-
-# Save pooled coefficient estimates (include non-selected variables as 0s)
-milPLCoef <- milPLresults$estimate
-rownames(InclFreq)
-milPLresults
-Coefficients[1:50,12] <- c(milPLCoef[1],0,0,0,milPLCoef[2:10],0,0,0,milPLCoef[11],0,milPLCoef[12],0,0,milPLCoef[13],0,
-                           milPLCoef[14],0,milPLCoef[15],0,0,0,milPLCoef[16],0,0,milPLCoef[17],0,0,0,0,milPLCoef[18],0,
-                           milPLCoef[19],0,milPLCoef[20],0,milPLCoef[21:23],0,0,0,0)
-
-####### Training Data ########
-
-# Calculate predicted scores for each participant in training set based on the averaged coefficients
-x = data.matrix(imputedTrain[,2:50]) # select columns of selected predictors
-y = as.numeric(imputedTrain$depression_raw) # select outcome
-b0 = Coefficients[1,12]
-b = Coefficients[2:50,12]
-predTrainmilPL = matrix(NA,nrow(imputedTrain),2) # create empty matrix to store predicted values
-predTrainmilPL[1:nrow(imputedTrain),] = x%*%b+b0 # calculate predicted y scores based on model
-predTrainmilPL[,2] <- imputedTrain$.imp
-
-# Calculate fit statistics within each imputed data set using the final model
-rsquaredPLmil = matrix(NA,m,1)
-msePLmil = matrix(NA,m,1)
-for(d in 1:m){
-  # Create observed outcome variable for one imputed data set
-  oneImputed <- imputedTrain[which(imputedTrain$.imp==d),-1]
-  y <- as.numeric(oneImputed$depression_raw)
-  
-  # Create predicted scores for one imputed data set
-  onePredict <- predTrainmilPL[which(predTrainmilPL[,2]==d),]
-  
-  # Calculate R-squared
-  # Calculate MSE, mean of Equation 1 in paper
-  rsquaredPLmil[d,1] = 1 - sum((y - onePredict[,1])^2)/sum((y - mean(y))^2)
-  msePLmil[d,1] = mean((y - onePredict[,1])^2)
-}
-
-# Calculate the inverse hyperbolic tangent of r
-zScoresPLmil = atanh(sqrt(rsquaredPLmil))
-
-# Calculate averaged z value and convert back to r-squared
-# Calculate averaged mse
-Fit[1,12] = tanh(mean(zScoresPLmil[,1]))^2
-Fit[2,12] = mean(msePLmil[,1])
-
-# correct way to calculate r-squared
-# Doesn't average the coefficients
-#pool.r.squared(milPLestimates, adjusted = FALSE)[1] 
-
-####### Test Data ########
-
-# Calculate predicted scores for each participant in training set based on the averaged coefficients
-x = data.matrix(imputedTest[,2:50]) # select columns of selected predictors
-y = as.numeric(imputedTest$depression_raw) # select outcome
-b0 = Coefficients[1,12]
-b = Coefficients[2:50,12]
-predTestmilPL = matrix(NA,nrow(imputedTest),2) # create empty matrix to store predicted values
-predTestmilPL[1:nrow(imputedTest),] = x%*%b+b0 # calculate predicted y scores based on model
-predTestmilPL[,2] <- imputedTest$.imp
-
-# Calculate fit statistics within each imputed data set using the final model
-rsquaredPLmilTest = matrix(NA,m,1)
-msePLmilTest = matrix(NA,m,1)
-for(d in 1:m){
-  # Create observed variable for one imputed data set
-  oneImputed <- imputedTest[which(imputedTest$.imp==d),-1]
-  y <- as.numeric(oneImputed$depression_raw)
-  
-  # Create predicted scores for one imputed data set
-  onePredict <- predTestSepPL[which(predTestSepPL[,2]==d),]
-  
-  # Calculate R-squared in training set for all 5 lambda values
-  # Calculate MSE, mean of Equation 1 in paper
-  rsquaredPLmilTest[d,1] = 1 - sum((y - onePredict[,1])^2)/sum((y - mean(y))^2)
-  msePLmilTest[d,1] = mean((y - onePredict[,1])^2)
-}
-
-# Calculate the inverse hyperbolic tangent of r
-zScoresPLmiltest = atanh(sqrt(rsquaredPLmilTest))
-
-# Calculate averaged z value and convert back to r-squared
-# Calculate averaged mse
-Fit[3,12] = tanh(mean(zScoresPLmiltest[,1]))^2
-Fit[4,12] = mean(msePLmilTest[,1])
-
-############################################################################
-############################################################################
-# OLS regression on multiply imputed data
-############################################################################
-############################################################################
-
-# Analyze an OLS Regression within each imputed data set (remove White dummy code to match stacked approach)
-OLSestimates <- with(TrainData_mids,
-                     lm(depression_raw ~ age+audit_c+count_lf+ptsd+anxietyr+sadr+intfsocr+energr+
-                          anxiety_raw+srMentH+srPhysH+srLivSit+srDrugFree+srSocNet+srSexRx+ssHelp+
-                          ssEmoHelp+ssNewFri+smAppFreq+datingAppFreq+losAng+female+cis+heterosexual+
-                          employed+poverty+insured+healthProvider+medicalUtil_re+erCare_re+sapro_lf+
-                          hivpp_lf+homeless_lf+incarceration_lf+ipv_lf+sexex_lf+suicide_lf+hospitalmh_lf+
-                          sexab_lf+tmx5old_lf+tmrob_lf+tmotinj_lf+tmotmdr_lf+xdrug_r+smoke_lf+Black+
-                          Latinx+Other))
-
-# Pool the estimates and standard errors via Rubin's Rules
-OLSresults <- summary(pool(OLSestimates))
-olsPooled <- pool(OLSestimates)
-fmiOLS <- olsPooled$pooled$fmi
-
-# Flag significant predictors
-OLSresults$sig <- ifelse(OLSresults$p.value > .05, 0, 1)
-#View(OLSresults)
-
-# Save coefficient estimates (set coefficient for White to 0)
-OLSCoef <- OLSresults$estimate
-Coefficients[1:50,13] <- c(OLSCoef[1:48],0,OLSCoef[49])
-
-# correct way to calculate r-squared
-# Doesn't average the coefficients
-#pool.r.squared(OLSestimates, adjusted = FALSE)[1]
-
-####### Training Data ########
-
-# Calculate predicted scores for each participant in training set based on the averaged coefficients
-x = data.matrix(imputedTrain[,2:50]) # select columns of selected predictors
-b0 = Coefficients[1,13]
-b = Coefficients[2:50,13]
-predTrainOLS = matrix(NA,nrow(imputedTrain),2) # create empty matrix to store predicted values
-predTrainOLS[1:nrow(imputedTrain),] = x%*%b+b0 # calculate predicted y scores based on model
-predTrainOLS[,2] <- imputedTrain$.imp
-
-# Calculate fit statistics within each imputed data set using the final model
-rsquaredOLS = matrix(NA,m,1)
-mseOLS = matrix(NA,m,1)
-for(d in 1:m){
-  # Create observed outcome variable for one imputed data set
-  oneImputed <- imputedTrain[which(imputedTrain$.imp==d),-1]
-  y <- as.numeric(oneImputed$depression_raw)
-  
-  # Create predicted scores for one imputed data set
-  onePredict <- predTrainOLS[which(predTrainOLS[,2]==d),]
-  
-  # Calculate R-squared
-  # Calculate MSE, mean of Equation 1 in paper
-  rsquaredOLS[d,1] = 1 - sum((y - onePredict[,1])^2)/sum((y - mean(y))^2)
-  mseOLS[d,1] = mean((y - onePredict[,1])^2)
-}
-
-# Calculate the inverse hyperbolic tangent of r
-zScoresOLS = atanh(sqrt(rsquaredOLS))
-
-# Calculate averaged z value and convert back to r-squared
-# Calculate averaged mse
-Fit[1,13] = tanh(mean(zScoresOLS[,1]))^2
-Fit[2,13] = mean(mseOLS[,1])
-
-####### Test Data ########
-
-# Calculate predicted scores for each participant in training set based on the averaged coefficients
-x = data.matrix(imputedTest[,2:50]) # select columns of selected predictors
-predTestOLS = matrix(NA,nrow(imputedTest),2) # create empty matrix to store predicted values
-predTestOLS[1:nrow(imputedTest),] = x%*%b+b0 # calculate predicted y scores based on model
-predTestOLS[,2] <- imputedTest$.imp
-
-# Calculate fit statistics within each imputed data set using the final model
-rsquaredOLStest = matrix(NA,m,1)
-mseOLStest = matrix(NA,m,1)
-for(d in 1:m){
-  # Create observed outcome variable for one imputed data set
-  oneImputed <- imputedTest[which(imputedTest$.imp==d),-1]
-  y <- as.numeric(oneImputed$depression_raw)
-  
-  # Create predicted scores for one imputed data set
-  onePredict <- predTestOLS[which(predTestOLS[,2]==d),]
-  
-  # Calculate R-squared
-  # Calculate MSE, mean of Equation 1 in paper
-  rsquaredOLStest[d,1] = 1 - sum((y - onePredict[,1])^2)/sum((y - mean(y))^2)
-  mseOLStest[d,1] = mean((y - onePredict[,1])^2)
-}
-
-# Calculate the inverse hyperbolic tangent of r
-zScoresOLStest = atanh(sqrt(rsquaredOLStest))
-
-# Calculate averaged z value and convert back to r-squared
-# Calculate averaged mse
-Fit[3,13] = tanh(mean(zScoresOLStest[,1]))^2
-Fit[4,13] = mean(mseOLStest[,1])
 
 
 ##########################################################################################################
@@ -1280,14 +1020,17 @@ Fit[4,13] = mean(mseOLStest[,1])
 rownames(Coefficients) <- VarNames
 
 # Number of variables chosen (not including intercept)
-VarChosen = matrix(NA,13)
-for(c in 1:13){
+VarChosen = matrix(NA,10)
+for(c in 1:10){
   VarChosen[c] = sum(abs(Coefficients[2:nrow(Coefficients),c])>0)
 }
+# Select only columns of methods presented in paper
+VarChosen[c(1,2,9,10)]
+
+Fit[,c(1,2,9,10)]
 
 # How many methods chose this variable?
-# Select only columns of methods presented in paper
-Coefficients.mod <- Coefficients[,c(4,9,11)]
+Coefficients.mod <- Coefficients[,c(2,9,10)]
 MethChosen = matrix(NA,P+1)
 for(p in 1:(P+1)){
   MethChosen[p] = sum(abs(Coefficients.mod[p,1:ncol(Coefficients.mod)])>0)
@@ -1306,19 +1049,18 @@ row_order <- c("Intercept","age","audit_c","count_lf","ptsd","anxietyr","sadr","
                "hospitalmh_lf","sexab_lf","tmx5old_lf","tmrob_lf","tmotinj_lf","tmotmdr_lf","xdrug_r","smoke_lf")
 
 # Create table of coefficients and fit statistics, Round decimal places
-Table2a <- round(Coefficients[,c(1:13)],2)
+Table2a <- round(Coefficients[,c(1:10)],2)
 Table2a <- Table2a[row_order,]
-colnames(Table2a)<-c("SepAvg","SepMed","SepMin","SepMax","SepInd","SepPost","StackedW","StackedW2","StackedNW",
-                    "StackedPost","MI-LASSO","MI-LASSOpost","OLS")
-Table2b <- round(Coefficients[,c(4,6,9:12)],2)
-Table2b <- Table2b[,c(1,2:6)]
-Table2b <- cbind(Table2b[,1],InclFreq[,4],Table2b[,2:6])
+colnames(Table2a)<-c("Listwise","SepAvg","SepMed","SepMin","SepMax","SepInd",
+                     "StackedW","StackedW2","StackedNW","MI-LASSO")
+Table2b <- round(Coefficients[,c(1,2,9,10)],2)
+Table2b <- cbind(Table2b[,1:2],InclFreq[,1],Table2b[,3:4])
 Table2b <- Table2b[row_order,]
-colnames(Table2b)<-c("SepMax","IF","SepPost","StackedNW","StackedPost","MI-LASSO","MI-LASSOpost")
+colnames(Table2b)<-c("Listwise","SepMax","IF","StackedNW","MI-LASSO")
 
 # Round decimal places
 Fit_round <- round(Fit,3)
-Fit_roundb <- Fit_round[,c(4,6,9:12)]
+Fit_roundb <- Fit_round[,c(1,2,9,10)]
 
 # Output coefficients and fit statistics as csv files
 #write.csv(Table2b, paste0(WRKDIR,"Table2_Coefficients.csv"))
@@ -1328,8 +1070,26 @@ Fit_roundb <- Fit_round[,c(4,6,9:12)]
 # FMI
 ################################################################
 
-# Select original data set (contains missing values) and remove ".imp" column
-original <- fullData[fullData$.imp==0,-1]
+# Convert imputed data set to mids type
+TrainData_mids<-as.mids(TrainData)
+
+# Analyze an OLS Regression within each imputed data set (remove Latinx dummy code to match stacked approach)
+OLSestimates <- with(TrainData_mids,
+                     lm(depression_raw ~ age+audit_c+count_lf+ptsd+anxietyr+sadr+intfsocr+energr+
+                          anxiety_raw+srMentH+srPhysH+srLivSit+srDrugFree+srSocNet+srSexRx+ssHelp+
+                          ssEmoHelp+ssNewFri+smAppFreq+datingAppFreq+losAng+female+cis+heterosexual+
+                          employed+poverty+insured+healthProvider+medicalUtil_re+erCare_re+sapro_lf+
+                          hivpp_lf+homeless_lf+incarceration_lf+ipv_lf+sexex_lf+suicide_lf+hospitalmh_lf+
+                          sexab_lf+tmx5old_lf+tmrob_lf+tmotinj_lf+tmotmdr_lf+xdrug_r+smoke_lf+Black+
+                          White+Other))
+
+# Pool the estimates and standard errors via Rubin's Rules
+OLSresults <- summary(pool(OLSestimates))
+olsPooled <- pool(OLSestimates)
+fmiOLS <- olsPooled$pooled$fmi
+
+# Select original data set (contains missing values) and remove ".imp" and ".id" columns
+original <- fullDataID[fullDataID$.imp==0,-c(1,52)]
 
 # Calculate number of missing values per variable as well as percentage, format n (%)
 datmiss <- sapply(original,function(x) sum(is.na(x)))
@@ -1339,8 +1099,8 @@ Table <- cbind(names(original),percmiss)
 # Reorder to match Inclusion Frequency
 Table <- Table[c(50,1:49),]
 
-# Reorder FMI variable from OLS to match Inclusion Frequency (white was reference variable)
-fmiOLS_r <- fmiOLS[c(1:48,NA,49)]
+# Reorder FMI variable from OLS to match Inclusion Frequency (Latinx was reference variable)
+fmiOLS_r <- fmiOLS[c(1:47,NA,48,49)]
 
 # Merge with Inclusion Frequency data and FMI variable from OLS
 IFfmi <- cbind(InclFreq,Table[,2],fmiOLS_r)
@@ -1348,9 +1108,8 @@ colnames(IFfmi)[6] <- "PercentMissing"
 colnames(IFfmi)[7] <- "FMI"
 IFfmi$PercentMissing <- as.numeric(IFfmi$PercentMissing)
 
-# Remove intercept and white race rows
-IFfmi <- IFfmi[c(2:48,50),]
-#IFfmi$FMI <- as.numeric(IFfmi$FMI)
+# Remove intercept and latinx rows
+IFfmi <- IFfmi[c(2:47,49,50),]
 
 # Create variable that measures consistent selection
 IFfmi$consistent <- ifelse(IFfmi$Max==100|IFfmi$Max==0,1,0)
@@ -1360,7 +1119,6 @@ table(IFfmi$consistent)
 plot(IFfmi$FMI,IFfmi$Max,xlab="FMI",ylab="Inclusion Frequency - Max Lambda")
 plot(IFfmi$PercentMissing,IFfmi$Max)
 
-
 # Look at means of FMI by consistency of selection
 aggregate(IFfmi$FMI, list(IFfmi$consistent), mean)
 aggregate(IFfmi$PercentMissing, list(IFfmi$consistent), mean)
@@ -1369,23 +1127,6 @@ aggregate(IFfmi$PercentMissing, list(IFfmi$consistent), mean)
 Outlier <- IFfmi[IFfmi$PercentMissing <= 10,]
 aggregate(Outlier$FMI, list(Outlier$consistent), mean)
 aggregate(Outlier$PercentMissing, list(Outlier$consistent), mean)
-
-# Logistic Regression of Consistent on FMI
-Reg1 <- glm(consistent ~ FMI, family=binomial(link='logit'), data=IFfmi)
-summary(Reg1)
-plot(IFfmi$FMI,IFfmi$consistent)
-
-# t-tests
-Reg1 <- lm(FMI ~ consistent, data=IFfmi)
-summary(Reg1)
-Reg1 <- lm(FMI ~ consistent, data=Outlier)
-summary(Reg1)
-
-#Regression of IF on FMI (as FMI increases, IF increases, not significant)
-Reg1 <- lm(Max ~ FMI, data=IFfmi)
-summary(Reg1)
-Reg2 <- lm(Max ~ PercentMissing, data=IFfmi)
-summary(Reg2)
 
 ################################################################
 # PSR
@@ -1403,13 +1144,10 @@ psr_r <- psr_r[order(psr_r$i,psr_r$order),]
 IFpsr <- cbind(InclFreq,psr_r)
 
 # Group variables into those selected and those not based on threshold
-IFpsr$selected <- ifelse(IFpsr$Max >= 50,1,0)
+IFpsr$selected <- ifelse(IFpsr$Mean >= 50,1,0)
 
 # Group variables based on consistency of selection
-IFpsr$consistent <- ifelse(IFpsr$Max==100|IFpsr$Max==0,1,0)
-
-aggregate(IFpsr[,7], list(IFpsr$consistent), mean)
-aggregate(IFpsr[,7], list(IFpsr$consistent), var)
+IFpsr$consistent <- ifelse(IFpsr$Mean==100|IFpsr$Mean==0,1,0)
 
 # Look at only first few imputations and remove intercept
 IFpsr2 <- IFpsr[2:50,]
@@ -1444,8 +1182,8 @@ for (d in 1:m) {
   }
 }
 
-# Select inclusion frequency of just the max lambda and merge with standardized coefficients
-IncFreq <- InclFreq[2:nrow(InclFreq),4]
+# Select inclusion frequency of just the mean lambda and merge with standardized coefficients
+IncFreq <- InclFreq[2:nrow(InclFreq),1]
 CoefIF <- cbind(bSTD,IncFreq)
 
 sd = NA
@@ -1474,24 +1212,19 @@ for(j in 1:(P)){
   }
 }
 
-Check <- cbind(CoefIF,sd,min,max,range,minabs,maxabs)
-View(Check)
+StdSlopes <- cbind(CoefIF,sd,min,max,range,minabs,maxabs)
 
 # Apply variable names to rows of Coefficients matrix
-rownames(Check) <- VarNames[2:50]
+rownames(StdSlopes) <- VarNames[2:50]
+View(StdSlopes)
 
-hist(Check[9,1:50], xlab="Coefficients")
-hist(Check[20,1:50], xlab="Coefficients")
+# Examples
+StdSlopes[9,c(51,53:54)] # anxiety_raw
+StdSlopes[45,c(51,53:54)] # smoke_lf
 
-for(j in 1:P){
-  hist(Check[j,1:50], xlab="Coefficients")
-}
-
-# Remove variables never selected
-Check2 <- Check[Check[,51] != 0,]
-
-# Select just employed variable
-empl <- Check2[15,51:57]
+#for(j in 1:P){
+#  hist(StdSlopes[j,1:50], xlab="Coefficients")
+#}
 
 ##############################################
 # Plots of lambda values
@@ -1519,7 +1252,7 @@ for(d in 1:m){
 }
 
 # Distribution of lambda values
-hist(lambdaSeparateCheck, xlab="Lambda",main="",ylim = c(0,20),xlim = c(.06,.17))
+hist(lambdaSeparateCheck, xlab="Lambda",main="",ylim = c(0,25),xlim = c(.06,.17))
 
 # Save all m optimal lambda values
 lambdaSeparateCheck = matrix(NA,m)
@@ -1530,7 +1263,7 @@ for(d in 1:m){
   oneImputed <- imputedTrain[which(imputedTrain$.imp==d),-1]
   
   # 10-fold Cross-validation to find lambda (for that imputed data set)
-  set.seed(32225) # a bit kurtotic
+  set.seed(48766)
   cv.separate <- cv.glmnet(x=data.matrix(oneImputed[,1:P]), y=oneImputed$depression_raw,
                            alpha=1,standardize=TRUE,intercept=TRUE,type.measure="mse",nfolds=k)
   
@@ -1539,7 +1272,7 @@ for(d in 1:m){
 }
 
 # Distribution of lambda values
-hist(lambdaSeparateCheck, xlab="Lambda",main="",ylim = c(0,20),xlim = c(.06,.17))
+hist(lambdaSeparateCheck, xlab="Lambda",main="",ylim = c(0,25),xlim = c(.06,.17))
 
 # Save all m optimal lambda values
 lambdaSeparateCheck = matrix(NA,m)
@@ -1559,7 +1292,7 @@ for(d in 1:m){
 }
 
 # Distribution of lambda values
-hist(lambdaSeparateCheck, xlab="Lambda",main="",ylim = c(0,20),xlim = c(.06,.17))
+hist(lambdaSeparateCheck, xlab="Lambda",main="",ylim = c(0,25),xlim = c(.06,.17))
 
 # Save all m optimal lambda values
 lambdaSeparateCheck = matrix(NA,m)
@@ -1570,7 +1303,7 @@ for(d in 1:m){
   oneImputed <- imputedTrain[which(imputedTrain$.imp==d),-1]
   
   # 10-fold Cross-validation to find lambda (for that imputed data set)
-  set.seed(861123) # negatively skewed
+  set.seed(97781)
   cv.separate <- cv.glmnet(x=data.matrix(oneImputed[,1:P]), y=oneImputed$depression_raw,
                            alpha=1,standardize=TRUE,intercept=TRUE,type.measure="mse",nfolds=k)
   
@@ -1579,14 +1312,48 @@ for(d in 1:m){
 }
 
 # Distribution of lambda values
-hist(lambdaSeparateCheck, xlab="Lambda",main="",ylim = c(0,20),xlim = c(.06,.17))
+hist(lambdaSeparateCheck, xlab="Lambda",main="",ylim = c(0,25),xlim = c(.06,.17))
 
 
-# calculate end time to determine how long analyses take to run
+# Save all m optimal lambda values
+lambdaSeparateCheck = matrix(NA,m)
+
+##############################################
+# Examples of pooled estimates in paper
+##############################################
+
+InclFreq["anxiety_raw",1]
+InclFreq["ssNewFri",1]
+InclFreq["smoke_lf",1]
+InclFreq["age",1]
+
+Table3 <- t(coefSeparAvg[c(10,19,46,2),])
+colnames(Table3)<-c("anxiety_raw","ssNewFri","smoke_lf","age")
+# rows are imputed data sets
+
+# Calculate mean of slopes regardless of threshold
+meanslopes = matrix(NA,1,4)
+for (a in 1:4){
+  meanslopes[1,a] <- mean(Table3[1:50,a])
+}
+Table3 <- rbind(Table3,meanslopes)
+
+# Round decimal places
+Table3 <- round(Table3,3)
+
+View(Table3)
+
+# Output coefficients as csv file
+#write.csv(Table3, paste0(WRKDIR,"Table3_Coefficients.csv"))
+
+# Add twos row for inclusion frequency and estimate used in final model, which matches Table 2
+
+##############################################
+# Calculate end time to determine how long analyses take to run
+##############################################
+
 end.time.total <- Sys.time()
 time.taken.total <- end.time.total - start.time.total
-
-# Comparing lengths of time different approaches took to run
 time.taken.total
 time.taken.mil
 length(grid)

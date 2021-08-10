@@ -1,7 +1,5 @@
-# MiML
-Code and data used for "How to Apply Variable Selection Machine Learning Algorithms with Multiply Imputed Data:  A Missing Discussion"
-
 # MiML (multiple imputation machine learning) project
+Code and data used for "How to Apply Variable Selection Machine Learning Algorithms with Multiply Imputed Data:  A Missing Discussion"
 
 # Description of project
 

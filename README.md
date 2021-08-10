@@ -14,3 +14,7 @@ Multiple Imputation (Blimp): Blimp syntax file
 PSRs_with_Labels: data set created by Blimp that contains the PSR values from the imputation process
 
 LASSOs.R: syntax file to fit the LASSOs for all 4 approaches and calculate descriptive statistics (need Blimp to create imps_stacked.dat)
+
+# Documents
+
+MiML_preprint: preprint of the manuscript sent to Psychological Methods 9/14/20

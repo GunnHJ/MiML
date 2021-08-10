@@ -11,8 +11,6 @@ baselineDataBlimp_0907.csv: raw data set used in Blimp program to impute missing
 
 Multiple Imputation (Blimp): Blimp syntax file
 
-imps_stacked.dat: stacked set of raw data set and imputed data sets
+PSRs_with_Labels: data set created by Blimp that contains the PSR values from the imputation process
 
-PSRs_with_Labels: data set that contains the PSR values from the imputation process
-
-LASSOs.R: syntax file to fit the LASSOs for all 4 approaches and calculate descriptive statistics
+LASSOs.R: syntax file to fit the LASSOs for all 4 approaches and calculate descriptive statistics (need Blimp to create imps_stacked.dat)
